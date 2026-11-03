@@ -1,0 +1,6 @@
+# Ephemeral runtime state (Gitea SQLite DB, runner data, Harbor installer & volumes)
+.lab-runtime/
+
+# OS & Node artifacts
+node_modules/
+.DS_Store

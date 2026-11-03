@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dev
+
+resources:
+  - ../../../base/payments
+
+replicas:
+  - name: payments-api
+    count: 1
+
+images:
+  - name: payments-api
+    newName: harbor.orb.local:8085/dev/payments-api
+    newTag: "1.0.0"
+
+patches:
+  - target:
+      kind: Deployment
+      name: payments-api
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payments-api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: payments-api
+                env:
+                  - name: LOG_LEVEL
+                    value: debug
