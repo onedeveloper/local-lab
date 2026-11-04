@@ -139,7 +139,32 @@ When building a new application repo to run on this platform, use these pre-prov
 
 ---
 
-## 5. Teardown / Total Nuke
+## 5. Running on Linux (e.g. Beelink SER9 / Native `x86_64`)
+
+OrbStack is a macOS-only application (it runs a lightweight Linux VM and provides automatic `*.orb.local` DNS resolution on macOS). On a native Linux machine (such as an AMD Ryzen Beelink SER9), Docker and Kind run directly on the Linux kernel with **zero VM overhead** and **zero `amd64` Rosetta emulation** for Harbor.
+
+To run this lab on Linux without OrbStack, only **3 small adjustments** are needed:
+
+1. **Map `gitea.orb.local` and `harbor.orb.local` in `/etc/hosts` (Host DNS):**
+   Inside the `kind` Docker network, Docker's embedded DNS already resolves `gitea`, `harbor.orb.local`, and `nginx` automatically via container aliases. Only the Linux host OS itself needs `/etc/hosts` entries so your browser and host CLI commands (`curl`, `docker login`, `git push`) resolve them to `127.0.0.1`:
+   ```bash
+   echo "127.0.0.1 gitea.orb.local harbor.orb.local" | sudo tee -a /etc/hosts
+   ```
+
+2. **Configure Docker `insecure-registries` in `/etc/docker/daemon.json`:**
+   Instead of `~/.orbstack/config/docker.json`, add `harbor.orb.local:8085` to your Linux Docker daemon config and restart Docker:
+   ```bash
+   sudo mkdir -p /etc/docker
+   echo '{"insecure-registries": ["harbor.orb.local:8085"]}' | sudo tee /etc/docker/daemon.json
+   sudo systemctl restart docker
+   ```
+
+3. **GNU `sed` vs. macOS BSD `sed` in [`scripts/bootstrap-lab.sh`](scripts/bootstrap-lab.sh):**
+   macOS BSD `sed` requires an empty backup extension (`sed -i '' '...'`), whereas Linux GNU `sed` uses `sed -i '...'` without the `''`. When running on Linux, replace `sed -i ''` with `sed -i` in `scripts/bootstrap-lab.sh` (lines 97–108), and explicitly expose port `8085:8080` on the `harbor` proxy container in `docker-compose.yml` if not already mapped by `./prepare`.
+
+---
+
+## 6. Teardown / Total Nuke
 
 When you are finished experimenting and want to reclaim all CPU/RAM/disk space:
 
