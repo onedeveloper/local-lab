@@ -16,19 +16,11 @@ fi
 
 echo "==> 3. Destroying Harbor containers & volumes..."
 if [ -d "${RUNTIME}/harbor" ]; then
-  (cd "${RUNTIME}/harbor" && sudo docker compose down -v --remove-orphans) || true
+  (cd "${RUNTIME}/harbor" && docker compose down -v --remove-orphans) || true
 fi
 
 echo "==> 4. Removing Docker 'kind' network & wiping .lab-runtime/..."
 docker network rm kind 2>/dev/null || true
-sudo rm -rf "${ROOT}/.lab-runtime"
+rm -rf "${ROOT}/.lab-runtime"
 
-echo "==> 5. Resetting Git working tree to clean 'seed' baseline..."
-if git -C "${ROOT}" remote get-url seed >/dev/null 2>&1; then
-  git -C "${ROOT}" checkout master
-  git -C "${ROOT}" reset --hard seed/master
-  git -C "${ROOT}" branch -f dev seed/dev
-  git -C "${ROOT}" branch -f prod seed/prod
-fi
-
-echo "==> Lab completely nuked. Run ./scripts/bootstrap-lab.sh whenever you want a fresh lab!"
+echo "==> Lab completely nuked. Run ./scripts/bootstrap-lab.sh whenever you want a fresh platform!"

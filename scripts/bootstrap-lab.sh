@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
-# Ephemeral Local Platform Engineering Lab Bootstrap
-# Spins up Tier 1 (Gitea + act_runner + Harbor), Tier 2 (kind-admin), Tier 3 (kind-dev + kind-prod),
-# locks 'seed' remote (GitHub), wires 'origin' to Local Gitea, seeds 1.0.0 images, and deploys via Argo CD.
+# Ephemeral Local Platform Engineering Lab Bootstrap (App-Agnostic Infrastructure)
+# Spins up:
+#   - Tier 1: Gitea (Port 3000) + Local Actions Runner + Harbor Registry & Trivy (Port 8085)
+#   - Tier 2: kind-admin (Argo CD on Port 8075, Grafana on Port 8070, Central Prometheus & Loki)
+#   - Tier 3: kind-dev (Envoy Gateway on Port 8080) & kind-prod (Envoy Gateway on Port 8090)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME="${ROOT}/.lab-runtime/appliances"
 
 echo "==> 0. Pre-flight check..."
-for cmd in docker kind kubectl kustomize helm argocd jq node skopeo git; do
+for cmd in docker kind kubectl kustomize helm argocd jq skopeo git; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' is not installed. Run: brew install $cmd" >&2; exit 1; }
 done
 docker info >/dev/null 2>&1 || { echo "ERROR: Docker / OrbStack is not running. Start OrbStack first!" >&2; exit 1; }
 
-if ! grep -q "orders.dev.local" /etc/hosts; then
-  echo "==> Adding lab hostnames to /etc/hosts (requires sudo)..."
-  sudo sh -c 'echo "127.0.0.1 gitea.orb.local harbor.orb.local orders.dev.local orders.prod.local" >> /etc/hosts'
+if [ -f "${HOME}/.orbstack/config/docker.json" ] && ! grep -q "harbor.orb.local:8085" "${HOME}/.orbstack/config/docker.json"; then
+  echo "==> Configuring OrbStack insecure-registries for harbor.orb.local:8085..."
+  jq '. + {"insecure-registries": ((.["insecure-registries"] // []) + ["harbor.orb.local:8085"] | unique)}' \
+    "${HOME}/.orbstack/config/docker.json" > "${HOME}/.orbstack/config/docker.json.tmp"
+  mv "${HOME}/.orbstack/config/docker.json.tmp" "${HOME}/.orbstack/config/docker.json"
+  command -v orb >/dev/null 2>&1 && orb restart docker
+fi
+
+if ! grep -q "gitea.orb.local" /etc/hosts || ! grep -q "harbor.orb.local" /etc/hosts; then
+  echo "==> Adding lab appliance hostnames to /etc/hosts (requires sudo)..."
+  sudo sh -c 'echo "127.0.0.1 gitea.orb.local harbor.orb.local" >> /etc/hosts'
 fi
 
 mkdir -p "${RUNTIME}"
@@ -57,7 +67,7 @@ services:
       - GITEA_INSTANCE_URL=http://gitea:3000
       - GITEA_RUNNER_REGISTRATION_TOKEN=${RUNNER_TOKEN:-}
       - GITEA_RUNNER_NAME=mac-local-runner
-      - GITEA_RUNNER_LABELS=ubuntu-latest:docker://node:22-bookworm
+      - GITEA_RUNNER_LABELS=ubuntu-latest:docker://golang:1.24-bookworm
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./runner-data:/data
@@ -78,10 +88,6 @@ docker exec -u git gitea gitea admin user create \
   --email platform@local.lab \
   --admin --must-change-password=false 2>/dev/null || true
 
-curl -sf -u "platform:password123" -X POST "http://localhost:3000/api/v1/user/repos" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "gitops-repo", "private": false, "auto_init": false}' >/dev/null 2>&1 || true
-
 export RUNNER_TOKEN=$(docker exec -u git gitea gitea actions generate-runner-token)
 (cd "${RUNTIME}" && docker compose up -d gitea-runner)
 
@@ -98,9 +104,17 @@ fi
   sed -i '' '/^https:/,/^[^ ]/ s/^/#/' harbor.yml
   sed -i '' 's/^harbor_admin_password: .*/harbor_admin_password: Harbor12345/' harbor.yml
   sed -i '' "s|^data_volume: .*|data_volume: ${RUNTIME}/harbor-data|" harbor.yml
-  sudo ./install.sh --with-trivy
+  ./prepare --with-trivy
+  # Listen on both 8080 and 8085 inside the proxy container so both host and kind/OrbStack DNS resolve port 8085
+  sed -i '' 's/listen 8080;/listen 8080;\
+    listen 8085;/' common/config/nginx/nginx.conf
+  mkdir -p "${RUNTIME}/harbor-data/log"
+  sed -i '' "s|/var/log/harbor/|${RUNTIME}/harbor-data/log/|g" docker-compose.yml
+  sed -i '' 's/container_name: nginx/container_name: harbor/' docker-compose.yml
+  docker compose down -v --remove-orphans 2>/dev/null || true
+  docker compose up -d
 )
-docker network connect kind nginx 2>/dev/null || true
+docker network connect --alias nginx --alias harbor.orb.local kind harbor 2>/dev/null || true
 until curl -sf -u "admin:Harbor12345" "http://harbor.orb.local:8085/api/v2.0/systeminfo" >/dev/null; do sleep 2; done
 
 curl -sf -u "admin:Harbor12345" -X POST "http://harbor.orb.local:8085/api/v2.0/projects" \
@@ -193,8 +207,10 @@ helm upgrade --install loki grafana/loki \
   --set loki.auth_enabled=false \
   --set loki.commonConfig.replication_factor=1 \
   --set loki.storage.type=filesystem \
+  --set loki.useTestSchema=true \
   --set singleBinary.replicas=1 \
   --set backend.replicas=0 --set read.replicas=0 --set write.replicas=0 \
+  --set chunksCache.enabled=false --set resultsCache.enabled=false \
   --set gateway.service.type=NodePort \
   --set gateway.service.nodePort=30100
 
@@ -280,46 +296,17 @@ GW
     --set "prometheus.prometheusSpec.remoteWrite[0].url=http://${ADMIN_IP}:30090/api/v1/write"
 done
 
-echo "==> 6. Wiring Git Remotes (seed=GitHub [push DISABLED], origin=Local Gitea) & Seeding 1.0.0..."
-cd "${ROOT}"
-CURRENT_ORIGIN="$(git remote get-url origin 2>/dev/null || true)"
-if [[ "${CURRENT_ORIGIN}" == *"github.com"* ]]; then
-  git remote rename origin seed
-fi
-if git remote get-url seed >/dev/null 2>&1; then
-  git remote set-url --push seed DISABLED
-fi
-git remote remove origin 2>/dev/null || true
-git remote add origin "http://platform:password123@gitea.orb.local:3000/platform/gitops-repo.git"
-
-git branch -f dev master 2>/dev/null || true
-git branch -f prod master 2>/dev/null || true
-
-"${ROOT}/scripts/build-and-push.sh" all 1.0.0
-"${ROOT}/scripts/promote.sh" all --seed
-git push -u origin master dev prod --force
-
-curl -sf -u "platform:password123" -X POST "http://gitea.orb.local:3000/api/v1/repos/platform/gitops-repo/branch_protections" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "branch_name": "prod",
-    "enable_push": false,
-    "enable_status_check": true,
-    "status_check_contexts": ["test"]
-  }' >/dev/null 2>&1 || true
-
-kubectl --context kind-admin apply -f "${ROOT}/argocd/microservices-appset.yaml"
-sleep 5
-for SVC in orders payments inventory; do
-  argocd app sync "${SVC}-api-prod" || true
-done
+kubectl config use-context kind-admin
 
 echo "================================================================="
-echo " Local Platform Engineering Lab is LIVE!"
-echo " - Gitea UI:   http://gitea.orb.local:3000   (platform / password123)"
-echo " - Harbor UI:  http://harbor.orb.local:8085  (admin / Harbor12345)"
-echo " - Argo CD UI: https://localhost:8075        (admin / ${ARGOCD_PASS})"
-echo " - Grafana UI: http://localhost:8070         (admin / admin)"
-echo " - Dev Edge:   http://orders.dev.local:8080/orders"
-echo " - Prod Edge:  http://orders.prod.local:8090/orders"
+echo " Local Platform Engineering Lab (Infrastructure) is LIVE!"
+echo " - Gitea UI:       http://gitea.orb.local:3000   (platform / password123)"
+echo " - Harbor UI:      http://harbor.orb.local:8085  (admin / Harbor12345)"
+echo " - Argo CD UI:     https://localhost:8075        (admin / ${ARGOCD_PASS})"
+echo " - Grafana UI:     http://localhost:8070         (admin / admin)"
+echo " - Dev Gateway:    http://localhost:8080         (kind-dev  -> Gateway: default/platform-gateway)"
+echo " - Prod Gateway:   http://localhost:8090         (kind-prod -> Gateway: default/platform-gateway)"
+echo ""
+echo " Next step: Onboard any external repository into Gitea & Argo CD:"
+echo "   ./scripts/onboard-repo.sh /path/to/your-app-repo"
 echo "================================================================="
