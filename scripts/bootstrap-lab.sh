@@ -23,11 +23,6 @@ if [ -f "${HOME}/.orbstack/config/docker.json" ] && ! grep -q "harbor.orb.local:
   command -v orb >/dev/null 2>&1 && orb restart docker
 fi
 
-if ! grep -q "gitea.orb.local" /etc/hosts || ! grep -q "harbor.orb.local" /etc/hosts; then
-  echo "==> Adding lab appliance hostnames to /etc/hosts (requires sudo)..."
-  sudo sh -c 'echo "127.0.0.1 gitea.orb.local harbor.orb.local" >> /etc/hosts'
-fi
-
 mkdir -p "${RUNTIME}"
 docker network inspect kind >/dev/null 2>&1 || docker network create kind
 
@@ -219,7 +214,6 @@ ADMIN_IP=$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' admi
 
 for ENV in dev prod; do
   kubectl config use-context "kind-${ENV}"
-  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
   helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
     --version v1.2.0 --namespace envoy-gateway-system --create-namespace
   kubectl -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout=180s
