@@ -9,18 +9,34 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME="${ROOT}/.lab-runtime/appliances"
 
+# Cross-platform in-place sed helper (macOS BSD sed vs Linux GNU sed)
+sedi() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
 echo "==> 0. Pre-flight check..."
 for cmd in docker kind kubectl kustomize helm argocd jq skopeo git; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' is not installed. Run: brew install $cmd" >&2; exit 1; }
+  command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' is not installed." >&2; exit 1; }
 done
-docker info >/dev/null 2>&1 || { echo "ERROR: Docker / OrbStack is not running. Start OrbStack first!" >&2; exit 1; }
+docker info >/dev/null 2>&1 || { echo "ERROR: Docker is not running. Start Docker / OrbStack first!" >&2; exit 1; }
 
-if [ -f "${HOME}/.orbstack/config/docker.json" ] && ! grep -q "harbor.orb.local:8085" "${HOME}/.orbstack/config/docker.json"; then
+if [[ "$(uname -s)" == "Darwin" ]] && [ -f "${HOME}/.orbstack/config/docker.json" ] && ! grep -q "harbor.orb.local:8085" "${HOME}/.orbstack/config/docker.json"; then
   echo "==> Configuring OrbStack insecure-registries for harbor.orb.local:8085..."
   jq '. + {"insecure-registries": ((.["insecure-registries"] // []) + ["harbor.orb.local:8085"] | unique)}' \
     "${HOME}/.orbstack/config/docker.json" > "${HOME}/.orbstack/config/docker.json.tmp"
   mv "${HOME}/.orbstack/config/docker.json.tmp" "${HOME}/.orbstack/config/docker.json"
   command -v orb >/dev/null 2>&1 && orb restart docker
+fi
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+  if ! grep -q "gitea.orb.local" /etc/hosts || ! grep -q "harbor.orb.local" /etc/hosts; then
+    echo "==> Linux detected: adding gitea.orb.local & harbor.orb.local to /etc/hosts (requires sudo)..."
+    echo "127.0.0.1 gitea.orb.local harbor.orb.local" | sudo tee -a /etc/hosts >/dev/null
+  fi
 fi
 
 mkdir -p "${RUNTIME}"
@@ -94,18 +110,18 @@ fi
 (
   cd "${RUNTIME}/harbor"
   cp harbor.yml.tmpl harbor.yml
-  sed -i '' 's/^hostname: .*/hostname: harbor.orb.local/' harbor.yml
-  sed -i '' 's/port: 80$/port: 8085/' harbor.yml
-  sed -i '' '/^https:/,/^[^ ]/ s/^/#/' harbor.yml
-  sed -i '' 's/^harbor_admin_password: .*/harbor_admin_password: Harbor12345/' harbor.yml
-  sed -i '' "s|^data_volume: .*|data_volume: ${RUNTIME}/harbor-data|" harbor.yml
+  sedi 's/^hostname: .*/hostname: harbor.orb.local/' harbor.yml
+  sedi 's/port: 80$/port: 8085/' harbor.yml
+  sedi '/^https:/,/^[^ ]/ s/^/#/' harbor.yml
+  sedi 's/^harbor_admin_password: .*/harbor_admin_password: Harbor12345/' harbor.yml
+  sedi "s|^data_volume: .*|data_volume: ${RUNTIME}/harbor-data|" harbor.yml
   ./prepare --with-trivy
   # Listen on both 8080 and 8085 inside the proxy container so both host and kind/OrbStack DNS resolve port 8085
-  sed -i '' 's/listen 8080;/listen 8080;\
+  sedi 's/listen 8080;/listen 8080;\
     listen 8085;/' common/config/nginx/nginx.conf
   mkdir -p "${RUNTIME}/harbor-data/log"
-  sed -i '' "s|/var/log/harbor/|${RUNTIME}/harbor-data/log/|g" docker-compose.yml
-  sed -i '' 's/container_name: nginx/container_name: harbor/' docker-compose.yml
+  sedi "s|/var/log/harbor/|${RUNTIME}/harbor-data/log/|g" docker-compose.yml
+  sedi 's/container_name: nginx/container_name: harbor/' docker-compose.yml
   docker compose down -v --remove-orphans 2>/dev/null || true
   docker compose up -d
 )

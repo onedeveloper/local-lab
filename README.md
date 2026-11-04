@@ -159,8 +159,8 @@ To run this lab on Linux without OrbStack, only **3 small adjustments** are need
    sudo systemctl restart docker
    ```
 
-3. **GNU `sed` vs. macOS BSD `sed` in [`scripts/bootstrap-lab.sh`](scripts/bootstrap-lab.sh):**
-   macOS BSD `sed` requires an empty backup extension (`sed -i '' '...'`), whereas Linux GNU `sed` uses `sed -i '...'` without the `''`. When running on Linux, replace `sed -i ''` with `sed -i` in `scripts/bootstrap-lab.sh` (lines 97–108), and explicitly expose port `8085:8080` on the `harbor` proxy container in `docker-compose.yml` if not already mapped by `./prepare`.
+3. **Cross-Platform `sed` & `/etc/hosts` Handling in [`scripts/bootstrap-lab.sh`](scripts/bootstrap-lab.sh):**
+   `scripts/bootstrap-lab.sh` automatically detects `uname -s` (`Darwin` vs. `Linux`) to switch between macOS BSD `sed -i ''` and Linux GNU `sed -i`, and automatically checks/adds `gitea.orb.local` and `harbor.orb.local` to `/etc/hosts` when running on Linux.
 
 ---
 
