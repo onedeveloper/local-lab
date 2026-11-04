@@ -13,7 +13,8 @@
 3. [Part 3: GitOps & CI/CD — What Runs Where (and Why)](#part-3-gitops--cicd--what-runs-where-and-why)
 4. [Part 4: Production Tooling Decisions (Argo CD, Gitea, Harbor vs. Artifactory, Observability)](#part-4-production-tooling-decisions-argo-cd-gitea-harbor-vs-artifactory-observability)
 5. [Part 5: The Target Multi-Cluster "Hub-and-Spoke" Architecture](#part-5-the-target-multi-cluster-hub-and-spoke-architecture)
-6. [Part 6: End-to-End Day-2 Workflow in the Target Platform](#part-6-end-to-end-day-2-workflow-in-the-target-platform)
+7. [Part 7: Additional Architectural Principles Established](#part-7-additional-architectural-principles-established)
+8. [Part 8: Phase 2 Evolution — Decoupling Platform Infrastructure from Workload Repositories (2026-11-04)](#part-8-phase-2-evolution--decoupling-platform-infrastructure-from-workload-repositories-2026-11-04)
 
 ---
 
@@ -308,3 +309,26 @@ To mirror strict enterprise release governance while keeping `dev` frictionless:
      - The `ApplicationSet` omits `automated` sync for `env == "prod"`.
      - Merging the PR marks `<svc>-api-prod` as **`OutOfSync` (Yellow)** in Argo CD without touching `kind-prod`.
      - **Human Approval #2:** The operator inspects the live Kubernetes manifest diff in the Argo CD UI (`https://localhost:8075`) and clicks **Sync → Synchronize** (or runs `argocd app sync <svc>-api-prod`) to execute the production rollout.
+
+---
+
+## Part 8: Phase 2 Evolution — Decoupling Platform Infrastructure from Workload Repositories (2026-11-04)
+
+In Phase 1, the sample e-commerce microservices (`orders-api`, `inventory-api`, `payments-api`), Kustomize overlays (`k8s/`), and Argo CD `ApplicationSet` (`argocd/`) were bundled directly inside the `local-lab` repository alongside the platform bootstrap scripts.
+
+In Phase 2, we refactored `local-lab` into a **100% app-agnostic Platform Infrastructure repository**, completely separating the **Platform Layer** from the **Application / Workload Layer**:
+
+### 8.1 Architectural Separation: Platform Repo vs. Workload Repos
+1. **`local-lab` (Pure Platform Infrastructure Repo):**
+   - Contains **only** the infrastructure lifecycle automation (`scripts/bootstrap-lab.sh`, `scripts/onboard-repo.sh`, `scripts/nuke-lab.sh`) and platform smoke tests (`tests/platform_test.go`).
+   - Provisions Tier 1 (`Gitea` + global `act_runner` + `Harbor` with `dev` and `prod` projects), Tier 2 (`kind-admin` with `Argo CD`, `Prometheus`, `Loki`, `Grafana`), and Tier 3 (`kind-dev` and `kind-prod` with `Envoy Gateway`, `harbor-pull-secret`, and telemetry agents).
+   - Remains a clean Git repository tracking GitHub (`origin/master`) without needing `seed` remote gymnastics or branch resets during teardown.
+2. **External Workload Repositories (e.g. `~/Projects/<app-repo>`):**
+   - Application source code, Dockerfiles, Kustomize overlays (`k8s/base`, `k8s/overlays/dev`, `k8s/overlays/prod`), and Argo CD `ApplicationSet` manifests live in their own dedicated repositories on disk.
+   - Any local repository can be onboarded onto the running platform via `./scripts/onboard-repo.sh /path/to/<app-repo>`, which creates the repository in local Gitea, wires `origin` to Gitea (preserving any GitHub remote as `seed` with `push` disabled), configures `prod` branch protection, and applies `<app-repo>/argocd/` to `kind-admin`.
+
+### 8.2 Cross-Platform Support (macOS OrbStack + Native Linux)
+- `scripts/bootstrap-lab.sh` automatically detects `uname -s` (`Darwin` vs. `Linux`):
+  - Uses a portable `sedi()` wrapper to handle macOS BSD `sed -i ''` vs. Linux GNU `sed -i`.
+  - Automatically ensures `gitea.orb.local` and `harbor.orb.local` are present in `/etc/hosts` when running on Linux (where OrbStack's automatic `*.orb.local` resolver is not present).
+  - Eliminated the redundant `kubectl apply` of Gateway API `standard-install.yaml` prior to `helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm`, preventing Helm v4 server-side apply CRD ownership conflicts.

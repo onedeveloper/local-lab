@@ -1,5 +1,8 @@
 # Local Kubernetes Platform Engineering Lab: From Code to GitOps via Gateway API
 
+> [!NOTE]
+> **Historical Reference (Initial Single-Cluster Prototype):** This document preserves the initial single-cluster prototype (`kind-lab` + `registry:2` + FastAPI calculator). For the current 3-cluster (`kind-admin`, `kind-dev`, `kind-prod`) app-agnostic platform lab with Gitea, Harbor, Argo CD, Envoy Gateway, and Prometheus/Loki/Grafana, see the root [`README.md`](../../README.md).
+
 This guide provides a comprehensive walkthrough to build an enterprise-grade Kubernetes platform locally on macOS (Apple Silicon M-series or Intel) using **OrbStack / Docker**, **Kind**, **ArgoCD**, **Gateway API (Envoy Gateway)**, and a **Local Container Registry**.
 
 ---

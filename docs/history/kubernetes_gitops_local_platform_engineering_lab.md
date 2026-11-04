@@ -1,5 +1,10 @@
 # Ephemeral Local Kubernetes Platform Engineering Lab: Multi-Cluster GitOps, Gateway API, Harbor, Gitea & Observability
 
+> [!NOTE]
+> **Historical Reference (Phase 1 Monorepo Walkthrough):** This document preserves the original Phase 1 greenfield guide where both the platform infrastructure and the sample e-commerce microservices (`orders-api`, `inventory-api`, `payments-api`) were built together inside a single repository.
+>
+> As of **Phase 2 (2026-11-04)**, `local-lab` has been refactored into an **app-agnostic Platform Infrastructure repository** (see the root [`README.md`](../../README.md) and [Part 8 of the Architecture & Roadmap](./platform_engineering_architecture_and_roadmap.md#part-8-phase-2-evolution--decoupling-platform-infrastructure-from-workload-repositories-2026-11-04)). Workload repositories now live separately and are onboarded via `./scripts/onboard-repo.sh`.
+
 This guide walks through building a **100% local, ephemeral, enterprise-grade Kubernetes platform from an empty directory on macOS** (optimized for **OrbStack**).
 
 ### Core Philosophy: "Build It, Break It, Fix It, Wipe It"
