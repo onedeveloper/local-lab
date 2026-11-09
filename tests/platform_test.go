@@ -18,7 +18,9 @@ func repoRoot(t *testing.T) string {
 func TestPlatformScriptsSyntaxAndExecutable(t *testing.T) {
 	root := repoRoot(t)
 	scripts := []string{
-		"scripts/bootstrap-lab.sh",
+		"scripts/bootstrap-common.sh",
+		"scripts/bootstrap-orbstack.sh",
+		"scripts/bootstrap-linux.sh",
 		"scripts/onboard-repo.sh",
 		"scripts/nuke-lab.sh",
 	}
@@ -52,15 +54,21 @@ func TestPlatformRepoIsAppAgnostic(t *testing.T) {
 		}
 	}
 
-	// Verify bootstrap-lab.sh does not hardcode sample microservices.
-	data, err := os.ReadFile(filepath.Join(root, "scripts", "bootstrap-lab.sh"))
-	if err != nil {
-		t.Fatalf("failed to read bootstrap-lab.sh: %v", err)
-	}
-	text := string(data)
-	for _, coupled := range []string{"orders", "inventory", "payments"} {
-		if strings.Contains(text, coupled) {
-			t.Fatalf("bootstrap-lab.sh still references coupled sample app %q", coupled)
+	// Verify bootstrap scripts do not hardcode sample microservices.
+	for _, rel := range []string{
+		"scripts/bootstrap-common.sh",
+		"scripts/bootstrap-orbstack.sh",
+		"scripts/bootstrap-linux.sh",
+	} {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", rel, err)
+		}
+		text := string(data)
+		for _, coupled := range []string{"orders", "inventory", "payments"} {
+			if strings.Contains(text, coupled) {
+				t.Fatalf("%s still references coupled sample app %q", rel, coupled)
+			}
 		}
 	}
 }

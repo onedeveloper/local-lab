@@ -23,4 +23,4 @@ echo "==> 4. Removing Docker 'kind' network & wiping .lab-runtime/..."
 docker network rm kind 2>/dev/null || true
 rm -rf "${ROOT}/.lab-runtime"
 
-echo "==> Lab completely nuked. Run ./scripts/bootstrap-lab.sh whenever you want a fresh platform!"
+echo "==> Lab completely nuked. Run ./scripts/bootstrap-orbstack.sh (macOS) or ./scripts/bootstrap-linux.sh (Linux) whenever you want a fresh platform!"

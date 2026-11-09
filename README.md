@@ -9,7 +9,7 @@ This repository provisions **pure platform infrastructure** ("your local cloud p
 ## Core Philosophy: Decoupled Platform vs. Workloads
 
 - **100% Local Runtime:** Once bootstrapped, **zero traffic leaves your Mac**. Git hosting (**Gitea**), CI pipelines (**Gitea `act_runner`**), OCI Registry & CVE scanning (**Harbor + Trivy**), GitOps reconciliation (**Argo CD**), Edge Ingress (**Envoy Gateway**), and Observability (**Grafana + Prometheus + Loki**) all run locally on the shared `kind` Docker network.
-- **App-Agnostic Infrastructure (`local-lab`):** This repository only manages the platform lifecycle (`bootstrap-lab.sh`, `onboard-repo.sh`, `nuke-lab.sh`). It contains zero hardcoded application code or workload manifests.
+- **App-Agnostic Infrastructure (`local-lab`):** This repository only manages the platform lifecycle (`bootstrap-{common,orbstack,linux}.sh`, `onboard-repo.sh`, `nuke-lab.sh`). It contains zero hardcoded application code or workload manifests.
 - **Multi-Repo Ready:** You can develop one or many application repositories anywhere on your Mac (e.g. `~/Projects/my-app`), onboard them into local Gitea with a single command, push container images to Harbor, and deploy them across `kind-dev` and `kind-prod` via Argo CD.
 
 ---
@@ -82,13 +82,17 @@ brew install kind kubectl kustomize helm argocd jq go skopeo
 
 ## 2. Quick Start: Boot the Platform
 
-Run the bootstrap script to provision all 3 tiers:
+Run the platform-specific bootstrap script to provision all 3 tiers:
 
 ```bash
-./scripts/bootstrap-lab.sh
+# macOS (OrbStack):
+./scripts/bootstrap-orbstack.sh
+
+# Native Linux:
+./scripts/bootstrap-linux.sh
 ```
 
-### What `bootstrap-lab.sh` Sets Up for You:
+### What `bootstrap-{orbstack,linux}.sh` + `bootstrap-common.sh` Set Up for You:
 1. **Gitea (`http://gitea.orb.local:3000`)**:
    - Admin credentials: `platform` / `password123`
    - Global `gitea-runner` (`act_runner`) registered and ready to run `.gitea/workflows/*.yml` for any repository pushed to Gitea.
@@ -143,24 +147,14 @@ When building a new application repo to run on this platform, use these pre-prov
 
 OrbStack is a macOS-only application (it runs a lightweight Linux VM and provides automatic `*.orb.local` DNS resolution on macOS). On a native Linux machine (such as an AMD Ryzen Beelink SER9), Docker and Kind run directly on the Linux kernel with **zero VM overhead** and **zero `amd64` Rosetta emulation** for Harbor.
 
-To run this lab on Linux without OrbStack, only **3 small adjustments** are needed:
+Simply run [`./scripts/bootstrap-linux.sh`](scripts/bootstrap-linux.sh), which automatically handles the 3 Linux host adjustments before invoking [`scripts/bootstrap-common.sh`](scripts/bootstrap-common.sh):
 
 1. **Map `gitea.orb.local` and `harbor.orb.local` in `/etc/hosts` (Host DNS):**
-   Inside the `kind` Docker network, Docker's embedded DNS already resolves `gitea`, `harbor.orb.local`, and `nginx` automatically via container aliases. Only the Linux host OS itself needs `/etc/hosts` entries so your browser and host CLI commands (`curl`, `docker login`, `git push`) resolve them to `127.0.0.1`:
-   ```bash
-   echo "127.0.0.1 gitea.orb.local harbor.orb.local" | sudo tee -a /etc/hosts
-   ```
-
+   Inside the `kind` Docker network, Docker's embedded DNS already resolves `gitea`, `harbor.orb.local`, and `nginx` automatically via container aliases. `bootstrap-linux.sh` ensures `/etc/hosts` resolves them to `127.0.0.1` on the Linux host so your browser and CLI commands (`curl`, `docker login`, `git push`) work identically.
 2. **Configure Docker `insecure-registries` in `/etc/docker/daemon.json`:**
-   Instead of `~/.orbstack/config/docker.json`, add `harbor.orb.local:8085` to your Linux Docker daemon config and restart Docker:
-   ```bash
-   sudo mkdir -p /etc/docker
-   echo '{"insecure-registries": ["harbor.orb.local:8085"]}' | sudo tee /etc/docker/daemon.json
-   sudo systemctl restart docker
-   ```
-
-3. **Cross-Platform `sed` & `/etc/hosts` Handling in [`scripts/bootstrap-lab.sh`](scripts/bootstrap-lab.sh):**
-   `scripts/bootstrap-lab.sh` automatically detects `uname -s` (`Darwin` vs. `Linux`) to switch between macOS BSD `sed -i ''` and Linux GNU `sed -i`, and automatically checks/adds `gitea.orb.local` and `harbor.orb.local` to `/etc/hosts` when running on Linux.
+   `bootstrap-linux.sh` merges `"harbor.orb.local:8085"` into `/etc/docker/daemon.json` via `jq` and restarts `docker` if needed.
+3. **Cross-Platform `sed` Handling in [`scripts/bootstrap-common.sh`](scripts/bootstrap-common.sh):**
+   `bootstrap-common.sh` automatically detects `uname -s` (`Darwin` vs. `Linux`) to switch between macOS BSD `sed -i ''` and Linux GNU `sed -i`.
 
 ---
 
