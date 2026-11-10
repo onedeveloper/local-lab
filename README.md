@@ -147,7 +147,23 @@ When building a new application repo to run on this platform, use these pre-prov
 
 OrbStack is a macOS-only application (it runs a lightweight Linux VM and provides automatic `*.orb.local` DNS resolution on macOS). On a native Linux machine (such as an AMD Ryzen Beelink SER9), Docker and Kind run directly on the Linux kernel with **zero VM overhead** and **zero `amd64` Rosetta emulation** for Harbor.
 
-Simply run [`./scripts/bootstrap-linux.sh`](scripts/bootstrap-linux.sh), which automatically handles the 3 Linux host adjustments before invoking [`scripts/bootstrap-common.sh`](scripts/bootstrap-common.sh):
+### Step A: Prepare a Fresh Ubuntu Host with Ansible (One-Time Setup)
+
+An idempotent Ansible playbook ([`ansible/playbook.yml`](ansible/playbook.yml)) is included to install all prerequisites on Ubuntu 22.04 / 24.04 (`docker`, `kind`, `kubectl`, `kustomize`, `helm`, `argocd`, `jq`, `skopeo`, `git`, `curl`, `go`), tune kernel `inotify` limits for running 3 Kind clusters concurrently, and pre-configure `/etc/hosts` and `/etc/docker/daemon.json`:
+
+```bash
+# Option 1: Run directly on the Ubuntu machine itself
+sudo apt update && sudo apt install -y ansible
+ansible-playbook -i ansible/inventory.ini -l local ansible/playbook.yml --ask-become-pass
+newgrp docker   # (or log out and back in so your shell picks up the 'docker' group)
+
+# Option 2: Run remotely from your Mac over SSH (after editing [ubuntu_lab] in ansible/inventory.ini)
+ansible-playbook -i ansible/inventory.ini -l ubuntu_lab ansible/playbook.yml --ask-become-pass
+```
+
+### Step B: Boot the Platform on Linux
+
+Simply run [`./scripts/bootstrap-linux.sh`](scripts/bootstrap-linux.sh), which automatically verifies (and applies if missing) the 3 Linux host adjustments before invoking [`scripts/bootstrap-common.sh`](scripts/bootstrap-common.sh):
 
 1. **Map `gitea.orb.local` and `harbor.orb.local` in `/etc/hosts` (Host DNS):**
    Inside the `kind` Docker network, Docker's embedded DNS already resolves `gitea`, `harbor.orb.local`, and `nginx` automatically via container aliases. `bootstrap-linux.sh` ensures `/etc/hosts` resolves them to `127.0.0.1` on the Linux host so your browser and CLI commands (`curl`, `docker login`, `git push`) work identically.

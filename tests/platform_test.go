@@ -72,3 +72,42 @@ func TestPlatformRepoIsAppAgnostic(t *testing.T) {
 		}
 	}
 }
+
+func TestAnsiblePlaybookCoversPrerequisites(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, rel := range []string{"ansible/playbook.yml", "ansible/inventory.ini"} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Fatalf("expected %s to exist: %v", rel, err)
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "ansible", "playbook.yml"))
+	if err != nil {
+		t.Fatalf("failed to read ansible/playbook.yml: %v", err)
+	}
+	playbook := string(data)
+
+	// Every CLI binary required by preflight_check() in bootstrap-common.sh must be covered.
+	requiredTools := []string{
+		"docker", "kind", "kubectl", "kustomize", "helm",
+		"argocd", "jq", "skopeo", "git", "curl",
+	}
+	for _, tool := range requiredTools {
+		if !strings.Contains(playbook, tool) {
+			t.Errorf("ansible/playbook.yml does not reference required prerequisite %q", tool)
+		}
+	}
+
+	// Verify multi-cluster inotify sysctl and insecure-registry configuration are present.
+	for _, setting := range []string{
+		"fs.inotify.max_user_watches",
+		"fs.inotify.max_user_instances",
+		"harbor.orb.local:8085",
+		"gitea.orb.local",
+	} {
+		if !strings.Contains(playbook, setting) {
+			t.Errorf("ansible/playbook.yml missing expected host setting %q", setting)
+		}
+	}
+}

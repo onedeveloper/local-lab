@@ -1,0 +1,269 @@
+---
+# Ansible Playbook: Prepare an Ubuntu 22.04 / 24.04 Host for local-lab (bootstrap-linux.sh)
+#
+# Uses 100% ansible.builtin modules (zero external Ansible Galaxy collections required).
+#
+# What this playbook configures:
+#   1. System apt packages (git, curl, jq, skopeo, golang-go, ca-certificates, gnupg)
+#   2. Official Docker Engine + Docker Compose v2 plugin + non-root 'docker' group access
+#   3. Cloud-native CLI binaries in /usr/local/bin (kubectl, kind, kustomize, helm, argocd)
+#   4. Kernel inotify & file-max sysctl limits required for running 3 Kind clusters concurrently
+#   5. /etc/hosts entries (gitea.orb.local, harbor.orb.local) & /etc/docker/daemon.json insecure-registries
+#   6. Final pre-flight verification matching scripts/bootstrap-common.sh
+
+- name: Prepare Ubuntu host for Local Kubernetes Platform Engineering Lab
+  hosts: all
+  become: true
+
+  vars:
+    lab_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+    bin_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+    kubectl_version: "v1.37.2"
+    kind_version: "v0.33.0"
+    kustomize_version: "v5.8.1"
+    helm_version: "v4.3.1"
+    argocd_version: "v3.5.6"
+    harbor_insecure_registry: "harbor.orb.local:8085"
+
+  pre_tasks:
+    - name: Verify target host is running Ubuntu / Debian family
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "This playbook is designed for Ubuntu/Debian hosts (detected: {{ ansible_os_family }})."
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. Base System Packages
+    # -------------------------------------------------------------------------
+    - name: Install required base apt packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - git
+          - jq
+          - skopeo
+          - golang-go
+          - tar
+          - gzip
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # -------------------------------------------------------------------------
+    # 2. Official Docker Engine & Docker Compose Plugin
+    # -------------------------------------------------------------------------
+    - name: Ensure /etc/apt/keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download official Docker GPG key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add official Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ bin_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/{{ ansible_distribution | lower }}
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+        update_cache: true
+
+    - name: Install Docker Engine and Compose v2 plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure Docker service is enabled and running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add '{{ lab_user }}' to the docker group (passwordless docker CLI)
+      ansible.builtin.user:
+        name: "{{ lab_user }}"
+        groups: docker
+        append: true
+      when: lab_user != "root"
+
+    # -------------------------------------------------------------------------
+    # 3. Cloud-Native CLI Tools (/usr/local/bin)
+    # -------------------------------------------------------------------------
+    - name: Install kubectl ({{ kubectl_version }})
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ bin_arch }}/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Install kind ({{ kind_version }})
+      ansible.builtin.get_url:
+        url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ bin_arch }}"
+        dest: /usr/local/bin/kind
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Install argocd CLI ({{ argocd_version }})
+      ansible.builtin.get_url:
+        url: "https://github.com/argoproj/argo-cd/releases/download/{{ argocd_version }}/argocd-linux-{{ bin_arch }}"
+        dest: /usr/local/bin/argocd
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Check installed kustomize version
+      ansible.builtin.command: /usr/local/bin/kustomize version
+      register: kustomize_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install kustomize ({{ kustomize_version }})
+      ansible.builtin.unarchive:
+        src: "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F{{ kustomize_version }}/kustomize_{{ kustomize_version }}_linux_{{ bin_arch }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: true
+        mode: "0755"
+        owner: root
+        group: root
+      when: kustomize_check.rc != 0 or (kustomize_version not in kustomize_check.stdout)
+
+    - name: Check installed helm version
+      ansible.builtin.command: /usr/local/bin/helm version --short
+      register: helm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download and extract helm ({{ helm_version }})
+      when: helm_check.rc != 0 or (helm_version not in helm_check.stdout)
+      block:
+        - name: Create temporary directory for helm archive
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: _helm
+          register: helm_tmp
+
+        - name: Unarchive helm release tarball
+          ansible.builtin.unarchive:
+            src: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ bin_arch }}.tar.gz"
+            dest: "{{ helm_tmp.path }}"
+            remote_src: true
+
+        - name: Move helm binary to /usr/local/bin/helm
+          ansible.builtin.copy:
+            src: "{{ helm_tmp.path }}/linux-{{ bin_arch }}/helm"
+            dest: /usr/local/bin/helm
+            remote_src: true
+            mode: "0755"
+            owner: root
+            group: root
+
+      always:
+        - name: Clean up temporary helm directory
+          ansible.builtin.file:
+            path: "{{ helm_tmp.path }}"
+            state: absent
+          when: helm_tmp.path is defined
+
+    # -------------------------------------------------------------------------
+    # 4. Linux Kernel Tuning for Multi-Cluster Kind (inotify & file descriptors)
+    # -------------------------------------------------------------------------
+    - name: Configure sysctl limits for 3 concurrent Kind clusters (/etc/sysctl.d/99-kind-lab.conf)
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kind-lab.conf
+        mode: "0644"
+        content: |
+          # Required for running kind-admin, kind-dev, and kind-prod + Promtail/Loki/Prometheus
+          fs.inotify.max_user_watches = 524288
+          fs.inotify.max_user_instances = 512
+          fs.file-max = 2097152
+      notify: Reload sysctl
+
+    # -------------------------------------------------------------------------
+    # 5. Host DNS (/etc/hosts) & Docker Insecure Registry (/etc/docker/daemon.json)
+    # -------------------------------------------------------------------------
+    - name: Map gitea.orb.local and harbor.orb.local in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*\bgitea\.orb\.local\b.*\bharbor\.orb\.local\b.*'
+        line: "127.0.0.1 gitea.orb.local harbor.orb.local"
+        state: present
+
+    - name: Ensure /etc/docker directory exists
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: "0755"
+
+    - name: Check existing /etc/docker/daemon.json
+      ansible.builtin.slurp:
+        src: /etc/docker/daemon.json
+      register: existing_daemon_json
+      failed_when: false
+
+    - name: Parse existing /etc/docker/daemon.json or default to empty dict
+      ansible.builtin.set_fact:
+        docker_daemon_cfg: >-
+          {{
+            (existing_daemon_json.content | b64decode | from_json)
+            if (existing_daemon_json is defined and existing_daemon_json.content is defined and (existing_daemon_json.content | b64decode | trim | length > 0))
+            else {}
+          }}
+
+    - name: Configure harbor.orb.local:8085 in /etc/docker/daemon.json insecure-registries
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: >-
+          {{
+            docker_daemon_cfg | combine({
+              'insecure-registries': ((docker_daemon_cfg.get('insecure-registries', []) + [harbor_insecure_registry]) | unique)
+            }) | to_nice_json
+          }}
+      notify: Restart docker
+
+    - name: Flush handlers before running verification
+      ansible.builtin.meta: flush_handlers
+
+    # -------------------------------------------------------------------------
+    # 6. Pre-Flight Verification (matches scripts/bootstrap-common.sh)
+    # -------------------------------------------------------------------------
+    - name: Verify all required platform CLI binaries are installed and on PATH
+      ansible.builtin.command: "which {{ item }}"
+      loop:
+        - docker
+        - kind
+        - kubectl
+        - kustomize
+        - helm
+        - argocd
+        - jq
+        - skopeo
+        - git
+        - curl
+      changed_when: false
+
+  handlers:
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Restart docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
