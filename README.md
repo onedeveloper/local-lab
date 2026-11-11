@@ -121,9 +121,9 @@ To connect a local Git repository to your running platform lab:
 
 ### What `onboard-repo.sh` Does:
 1. Creates the repository in local Gitea (`http://gitea.orb.local:3000/platform/<repo-name>.git`).
-2. Preserves your existing GitHub `origin` remote by renaming it to `seed` (with `push` set to `DISABLED` so local chaos experiments never accidentally push to GitHub), and sets `origin` to local Gitea.
-3. Creates/updates `dev` and `prod` branches and pushes them to Gitea.
-4. Configures branch protection on `prod` in Gitea (disables direct push; requires a Pull Request and passing `test` status check).
+2. Preserves any existing external `origin` remote (GitHub, GitLab, Bitbucket, SSH, etc.) by renaming it to `seed` (with `push` set to `DISABLED` so local chaos experiments never accidentally push upstream), and sets `origin` to local Gitea.
+3. Creates `dev` and `prod` branches if missing (preserving any existing diverged commits) and pushes to Gitea without overwriting an already-protected remote `prod` branch on re-runs.
+4. Configures or updates branch protection on `prod` in Gitea (disables direct push; requires a Pull Request and passing `test` status check).
 5. If your repository has an `argocd/` directory, automatically applies those Argo CD manifests (`Application` or `ApplicationSet`) to `kind-admin`.
 
 ---
@@ -166,6 +166,33 @@ cd ~/Projects/local-lab && ./scripts/bootstrap-linux.sh
 
 Once running inside the `beelink` VM, all UIs are reachable from your Mac via its dedicated host-only IP **`192.168.64.50`** (e.g. `http://192.168.64.50:3000` for Gitea, `http://192.168.64.50:8070` for Grafana, `https://192.168.64.50:8075` for Argo CD).
 
+#### Connecting Native macOS `kubectl` / `k9s` / Lens to the `beelink` VM Clusters
+
+By default, Kind binds each cluster's Kubernetes API server (`6443`) to `127.0.0.1:<random-port>` inside the VM. You can either run `kubectl` directly inside the VM (`limactl shell beelink kubectl ...`) or export the kubeconfig and forward the 3 API server ports so native `kubectl` / `k9s` on your Mac can talk directly to all 3 VM clusters:
+
+```bash
+# 1. Export the kubeconfig for all 3 clusters from the VM to your Mac:
+mkdir -p ~/.kube
+for c in admin dev prod; do
+  limactl shell beelink kind get kubeconfig --name "$c" > ~/.kube/beelink-$c.yaml
+done
+KUBECONFIG=~/.kube/beelink-admin.yaml:~/.kube/beelink-dev.yaml:~/.kube/beelink-prod.yaml \
+  kubectl config view --flatten > ~/.kube/beelink-config
+
+# 2. Forward the 3 API server ports from the VM to your Mac over Lima's SSH socket:
+ADMIN_PORT=$(limactl shell beelink docker inspect -f '{{(index (index .NetworkSettings.Ports "6443/tcp") 0).HostPort}}' admin-control-plane)
+DEV_PORT=$(limactl shell beelink docker inspect -f '{{(index (index .NetworkSettings.Ports "6443/tcp") 0).HostPort}}' dev-control-plane)
+PROD_PORT=$(limactl shell beelink docker inspect -f '{{(index (index .NetworkSettings.Ports "6443/tcp") 0).HostPort}}' prod-control-plane)
+
+ssh -F ~/.lima/beelink/ssh.config -fNL ${ADMIN_PORT}:127.0.0.1:${ADMIN_PORT} \
+  -L ${DEV_PORT}:127.0.0.1:${DEV_PORT} \
+  -L ${PROD_PORT}:127.0.0.1:${PROD_PORT} lima-beelink
+
+# 3. Point your Mac's current terminal (or k9s) at the VM's clusters:
+export KUBECONFIG=~/.kube/beelink-config
+kubectl config get-contexts
+```
+
 ### Option 2: Physical Ubuntu Server (e.g. Beelink SER9 / Native `x86_64`)
 
 #### Step A: Prepare a Fresh Ubuntu Host with Ansible (One-Time Setup)
@@ -198,7 +225,77 @@ Simply run [`./scripts/bootstrap-linux.sh`](scripts/bootstrap-linux.sh), which a
 
 ---
 
-## 6. Teardown / Total Nuke
+## 6. Inspecting Nodes, Apps, and Services Across the 3 Clusters
+
+The platform runs **3 separate Kubernetes clusters**:
+- **`kind-admin`**: Control plane hub (Argo CD, Grafana, Central Prometheus, Loki)
+- **`kind-dev`**: Dev workload cluster (Envoy Gateway, `dev` namespace, telemetry agents)
+- **`kind-prod`**: Prod workload cluster (Envoy Gateway, `prod` namespace, telemetry agents)
+
+#### 1. List and Switch Between the 3 Clusters
+```bash
+# See all available clusters:
+kubectl config get-contexts
+
+# Switch your active cluster:
+kubectl config use-context kind-admin   # or kind-dev, kind-prod
+
+# Or target a specific cluster on any command with --context:
+kubectl --context kind-dev get pods -A
+```
+
+#### 2. Inspect Nodes & Resource Usage
+```bash
+# View node status, Kubernetes version, and internal IP:
+kubectl --context kind-admin get nodes -o wide
+kubectl --context kind-dev   get nodes -o wide
+kubectl --context kind-prod  get nodes -o wide
+
+# Inspect node capacity, allocatable CPU/RAM, and running pods per node:
+kubectl --context kind-dev describe node dev-control-plane
+```
+
+#### 3. Inspect Pods, Deployments, and Services Across All Namespaces
+```bash
+# Everything running in kind-admin (Argo CD + Monitoring):
+kubectl --context kind-admin get pods,svc -A
+
+# Everything running in kind-dev (Envoy Gateway + Workload apps + Agents):
+kubectl --context kind-dev get pods,deploy,svc -A
+
+# Everything running in kind-prod:
+kubectl --context kind-prod get pods,deploy,svc -A
+```
+
+#### 4. Inspect Gateway API Routes (`GatewayClass`, `Gateway`, `HTTPRoute`)
+```bash
+# Check Envoy Gateway status and programmed address/ports on dev or prod:
+kubectl --context kind-dev get gatewayclass,gateway,httproute -A
+kubectl --context kind-prod get gatewayclass,gateway,httproute -A
+```
+
+#### 5. Inspect Argo CD Applications & Registered Clusters
+```bash
+# Using the Kubernetes API on kind-admin:
+kubectl --context kind-admin -n argocd get applications,applicationsets
+
+# Or using the argocd CLI:
+argocd cluster list
+argocd app list
+```
+
+#### 6. View Pod Logs
+```bash
+# Tail logs from Envoy Gateway on kind-dev:
+kubectl --context kind-dev -n envoy-gateway-system logs -l app.kubernetes.io/name=envoy-gateway -f
+
+# Tail logs from an onboarded app in the 'dev' namespace:
+kubectl --context kind-dev -n dev logs deploy/<your-app> -f
+```
+
+---
+
+## 7. Teardown / Total Nuke
 
 When you are finished experimenting and want to reclaim all CPU/RAM/disk space:
 
@@ -206,4 +303,4 @@ When you are finished experimenting and want to reclaim all CPU/RAM/disk space:
 ./scripts/nuke-lab.sh
 ```
 
-This destroys `kind-admin`, `kind-dev`, `kind-prod`, Gitea, the Actions runner, Harbor, the `kind` Docker network, and `.lab-runtime/`.
+This destroys `kind-admin`, `kind-dev`, `kind-prod`, Gitea, the Actions runner, Harbor, the `kind` Docker network, and the OS-scoped runtime directory (`.lab-runtime/` on macOS, `~/.local/share/local-lab/` on Linux — isolated so macOS OrbStack and a shared-mount Lima VM never collide).

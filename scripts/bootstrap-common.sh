@@ -11,7 +11,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNTIME="${ROOT}/.lab-runtime/appliances"
+# Isolate runtime state by OS so macOS (OrbStack) and Linux (Lima VM sharing ~/Projects via VirtioFS)
+# never collide on SQLite/Postgres/Redis volumes, runner tokens, or host-specific paths.
+if [[ -n "${LAB_RUNTIME_DIR:-}" ]]; then
+  RUNTIME_ROOT="${LAB_RUNTIME_DIR}"
+elif [[ "$(uname -s)" == "Linux" ]]; then
+  RUNTIME_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/local-lab"
+else
+  RUNTIME_ROOT="${ROOT}/.lab-runtime"
+fi
+RUNTIME="${RUNTIME_ROOT}/appliances"
 
 # Cross-platform in-place sed helper (macOS BSD sed vs Linux GNU sed)
 sedi() {
@@ -144,7 +153,12 @@ COMPOSE
     --email platform@local.lab \
     --admin --must-change-password=false 2>/dev/null || true
 
-  export RUNNER_TOKEN=$(docker exec -u git gitea gitea actions generate-runner-token)
+  mkdir -p "${RUNTIME}/runner-data"
+  if [ ! -f "${RUNTIME}/runner-data/.runner" ] || [ ! -s "${RUNTIME}/runner-data/.reg_token" ]; then
+    docker exec -u git gitea gitea actions generate-runner-token | tr -d '\r\n' > "${RUNTIME}/runner-data/.reg_token"
+  fi
+  export RUNNER_TOKEN
+  RUNNER_TOKEN="$(cat "${RUNTIME}/runner-data/.reg_token")"
   (cd "${RUNTIME}" && docker compose up -d gitea-runner)
 
   echo "==> 2. Starting Tier 1B: Harbor Registry + Trivy Scanner..."
@@ -205,14 +219,28 @@ spec:
       nodePort: 30085
 '
 
+  wait_for_url "https://localhost:8075/healthz" 60 1 -k
   ARGOCD_PASS=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
-  argocd login localhost:8075 --username admin --password "${ARGOCD_PASS}" --insecure
+  for ATTEMPT in {1..10}; do
+    if argocd login localhost:8075 --username admin --password "${ARGOCD_PASS}" --insecure; then
+      break
+    fi
+    if (( ATTEMPT == 10 )); then
+      echo "ERROR: Failed to log into Argo CD after 10 attempts." >&2
+      exit 1
+    fi
+    sleep 2
+  done
 
+  local TMP_KUBECONFIG
+  TMP_KUBECONFIG="$(mktemp)"
+  kubectl config view --raw > "${TMP_KUBECONFIG}"
   for ENV in dev prod; do
     INTERNAL_IP=$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' "${ENV}-control-plane")
-    kubectl config set-cluster "kind-${ENV}" --server="https://${INTERNAL_IP}:6443"
-    argocd cluster add "kind-${ENV}" --name "${ENV}-cluster" --yes
+    kubectl --kubeconfig "${TMP_KUBECONFIG}" config set-cluster "kind-${ENV}" --server="https://${INTERNAL_IP}:6443" >/dev/null
+    argocd cluster add "kind-${ENV}" --kubeconfig "${TMP_KUBECONFIG}" --name "${ENV}-cluster" --upsert --yes
   done
+  rm -f "${TMP_KUBECONFIG}"
 
   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
   helm repo add grafana https://grafana.github.io/helm-charts

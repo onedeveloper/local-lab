@@ -1,0 +1,28 @@
+name: Platform CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  verify:
+    name: Verify Scripts, Invariants & Ansible Playbook
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up uv (for Ansible playbook syntax check)
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run ShellCheck on lifecycle scripts
+        run: shellcheck -x scripts/*.sh
+
+      - name: Run platform Go test suite
+        run: go test -v ./tests/...

@@ -42,6 +42,7 @@ disk: "100GiB"            # 100 GB sparse expanding disk (only consumes actual u
 
 # -----------------------------------------------------------------------------
 # Apple Rosetta Translation Layer (x86_64 / amd64 Linux binaries & containers)
+# Required on Apple Silicon because Harbor v2.11.1 publishes linux/amd64-only images.
 # -----------------------------------------------------------------------------
 vmOpts:
   vz:
@@ -71,7 +72,7 @@ networks:
 # Zero OrbStack Conflict:
 #   Disable automatic forwarding of VM ports to macOS 127.0.0.1 so OrbStack and
 #   Lima can run simultaneously without fighting over localhost ports (3000, 8080, etc.).
-#   Access the VM directly via its dedicated `vz0` IP (e.g., 192.168.105.50).
+#   Access the VM directly via its dedicated `vz0` IP (192.168.64.50).
 # -----------------------------------------------------------------------------
 portForwards:
   - guestIPMustBeZero: false
@@ -99,7 +100,7 @@ provision:
       fi
 
       # 2. Pin a deterministic static IP (.50) on the vz0 host-to-VM interface
-      #    Detects the subnet assigned by macOS vmnet (typically 192.168.105.x or 192.168.106.x)
+      #    Detects the subnet assigned by macOS vzNAT (typically 192.168.64.x)
       #    and binds .50 so the VM always has a predictable IP from your Mac.
       if ip link show vz0 >/dev/null 2>&1; then
         SUBNET_PREFIX=$(ip -4 -o addr show dev vz0 | awk '{print $4}' | cut -d. -f1-3 | head -n1)
@@ -123,8 +124,12 @@ provision:
       fi
 
       # 3. Convenience symlink so ~/local-lab points to ~/Projects/local-lab
-      LIMA_HOME=$(eval echo "~$(ls /home | head -n1)")
+      #    Lima names the guest home directory /home/<user>.guest while the OS user is <user>,
+      #    so resolve the directory under /home directly rather than via ~<dir> expansion.
+      LIMA_HOME="/home/$(ls /home | head -n1)"
       if [ -d "${LIMA_HOME}/Projects/local-lab" ] && [ ! -e "${LIMA_HOME}/local-lab" ]; then
+        LIMA_USER="$(stat -c '%U' "${LIMA_HOME}")"
         ln -s "${LIMA_HOME}/Projects/local-lab" "${LIMA_HOME}/local-lab"
+        chown -h "${LIMA_USER}:${LIMA_USER}" "${LIMA_HOME}/local-lab"
       fi
 
