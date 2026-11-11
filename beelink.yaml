@@ -1,0 +1,130 @@
+# =============================================================================
+# Lima VM Specification: Replicating Beelink SER9 Headless Ubuntu 26.04 LTS Server
+# =============================================================================
+#
+# Quick Start:
+#   1. Install Lima (one-time):
+#      brew install lima
+#
+#   2. Create and start the headless Ubuntu Server VM:
+#      limactl start --name=beelink ./beelink.yaml --tty=false
+#
+#   3. Provision the VM with the repo's Ansible playbook (from your Mac):
+#      uv run --with ansible-core ansible-playbook -i ansible/inventory.ini -l lima ansible/playbook.yml
+#
+#   4. SSH into the VM (pure TUI):
+#      limactl shell beelink
+#      # (Or via standard ssh: ssh -F ~/.lima/beelink/ssh.config lima-beelink)
+#
+#   5. Inside the VM, boot the 3-cluster platform lab:
+#      cd ~/local-lab && ./scripts/bootstrap-linux.sh
+#
+# Lifecycle Commands:
+#   limactl stop beelink     # Shut down VM cleanly
+#   limactl start beelink    # Boot VM
+#   limactl delete beelink   # Destroy VM and reclaim disk space
+# =============================================================================
+
+# Inherit Lima's official Ubuntu 26.04 LTS (Resolute Raccoon) image & netplan boot fixes
+base:
+  - template:_images/ubuntu-26.04
+
+vmType: "vz"              # Native macOS Virtualization.framework (same hypervisor as Parallels)
+os: "Linux"
+arch: "aarch64"           # Required by Apple VZ hypervisor; x86_64 runs via Apple Rosetta below
+
+# -----------------------------------------------------------------------------
+# Hardware Profile (Beelink SER9 equivalent, leaving 8 cores & 96 GB for macOS)
+# -----------------------------------------------------------------------------
+cpus: 8                   # 8 vCPUs (adjust to 6 or 12 anytime via `limactl edit beelink`)
+memory: "32GiB"           # 32 GB RAM for 3 Kind clusters + Harbor + Gitea + Observability
+disk: "100GiB"            # 100 GB sparse expanding disk (only consumes actual used space)
+
+# -----------------------------------------------------------------------------
+# Apple Rosetta Translation Layer (x86_64 / amd64 Linux binaries & containers)
+# -----------------------------------------------------------------------------
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true       # Attach Apple's VZLinuxRosettaDirectoryShare to the VM
+      binfmt: true        # Automatically register Rosetta in /proc/sys/fs/binfmt_misc
+
+# -----------------------------------------------------------------------------
+# Workspace Mounts (VirtioFS — near-native filesystem speed)
+# -----------------------------------------------------------------------------
+mounts:
+  - location: "~/Projects"
+    mountPoint: "{{.Home}}/Projects"
+    writable: true
+
+# -----------------------------------------------------------------------------
+# Dual-NIC Networking:
+#   1. eth0 (Default SLIRP/User-mode NAT): Outbound internet access regardless of Wi-Fi
+#   2. vz0  (Apple vzNAT Host-to-VM NIC): Dedicated virtual switch between macOS and VM
+#            (192.168.64.50/24), 100% independent of Wi-Fi.
+# -----------------------------------------------------------------------------
+networks:
+  - vzNAT: true
+    interface: "vz0"
+
+# -----------------------------------------------------------------------------
+# Zero OrbStack Conflict:
+#   Disable automatic forwarding of VM ports to macOS 127.0.0.1 so OrbStack and
+#   Lima can run simultaneously without fighting over localhost ports (3000, 8080, etc.).
+#   Access the VM directly via its dedicated `vz0` IP (e.g., 192.168.105.50).
+# -----------------------------------------------------------------------------
+portForwards:
+  - guestIPMustBeZero: false
+    guestPortRange: [1, 65535]
+    ignore: true
+
+# Disable containerd inside Lima's base provisioning (ansible/playbook.yml installs official Docker CE)
+containerd:
+  system: false
+  user: false
+
+# -----------------------------------------------------------------------------
+# Boot Provisioning: Verify Rosetta x86_64 & Pin Static Host-to-VM IP on vz0
+# -----------------------------------------------------------------------------
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+
+      # 1. Verify Apple Rosetta binfmt_misc registration for x86_64 binaries & amd64 containers
+      if [ -f /proc/sys/fs/binfmt_misc/rosetta ]; then
+        echo "==> Apple Rosetta x86_64 translation layer is active:"
+        cat /proc/sys/fs/binfmt_misc/rosetta
+      fi
+
+      # 2. Pin a deterministic static IP (.50) on the vz0 host-to-VM interface
+      #    Detects the subnet assigned by macOS vmnet (typically 192.168.105.x or 192.168.106.x)
+      #    and binds .50 so the VM always has a predictable IP from your Mac.
+      if ip link show vz0 >/dev/null 2>&1; then
+        SUBNET_PREFIX=$(ip -4 -o addr show dev vz0 | awk '{print $4}' | cut -d. -f1-3 | head -n1)
+        if [ -n "${SUBNET_PREFIX}" ]; then
+          STATIC_IP="${SUBNET_PREFIX}.50"
+          if ! ip -4 addr show dev vz0 | grep -q "${STATIC_IP}/24"; then
+            ip addr add "${STATIC_IP}/24" dev vz0
+          fi
+          cat <<NETPLAN > /etc/netplan/99-beelink-static.yaml
+      network:
+        version: 2
+        ethernets:
+          vz0:
+            dhcp4: true
+            addresses:
+              - ${STATIC_IP}/24
+      NETPLAN
+          chmod 600 /etc/netplan/99-beelink-static.yaml
+          echo "==> Pinned static Host-to-VM IP on vz0: ${STATIC_IP}"
+        fi
+      fi
+
+      # 3. Convenience symlink so ~/local-lab points to ~/Projects/local-lab
+      LIMA_HOME=$(eval echo "~$(ls /home | head -n1)")
+      if [ -d "${LIMA_HOME}/Projects/local-lab" ] && [ ! -e "${LIMA_HOME}/local-lab" ]; then
+        ln -s "${LIMA_HOME}/Projects/local-lab" "${LIMA_HOME}/local-lab"
+      fi
+

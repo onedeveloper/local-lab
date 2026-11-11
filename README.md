@@ -143,25 +143,49 @@ When building a new application repo to run on this platform, use these pre-prov
 
 ---
 
-## 5. Running on Linux (e.g. Beelink SER9 / Native `x86_64`)
+## 5. Running on Linux (Beelink SER9 or Local Lima Ubuntu 26.04 LTS VM)
 
-OrbStack is a macOS-only application (it runs a lightweight Linux VM and provides automatic `*.orb.local` DNS resolution on macOS). On a native Linux machine (such as an AMD Ryzen Beelink SER9), Docker and Kind run directly on the Linux kernel with **zero VM overhead** and **zero `amd64` Rosetta emulation** for Harbor.
+OrbStack is a macOS-only application (it runs a lightweight Linux VM and provides automatic `*.orb.local` DNS resolution on macOS). You can also run this entire platform lab on a dedicated Ubuntu Server—either on physical hardware (such as an AMD Ryzen Beelink SER9) or inside a local headless Ubuntu 26.04 LTS VM on Apple Silicon via **Lima** ([`beelink.yaml`](beelink.yaml)).
 
-### Step A: Prepare a Fresh Ubuntu Host with Ansible (One-Time Setup)
+### Option 1: Local Headless Ubuntu 26.04 LTS Server VM via Lima (`beelink.yaml`)
 
-An idempotent Ansible playbook ([`ansible/playbook.yml`](ansible/playbook.yml)) is included to install all prerequisites on Ubuntu 22.04 / 24.04 (`docker`, `kind`, `kubectl`, `kustomize`, `helm`, `argocd`, `jq`, `skopeo`, `git`, `curl`, `go`), tune kernel `inotify` limits for running 3 Kind clusters concurrently, and pre-configure `/etc/hosts` and `/etc/docker/daemon.json`:
+If your physical Linux box is unavailable, [`beelink.yaml`](beelink.yaml) provisions an isolated headless **Ubuntu 26.04.1 LTS** VM on Apple Silicon (`Virtualization.framework`) with **8 vCPUs**, **32 GiB RAM**, **100 GiB disk**, **Apple Rosetta `x86_64` translation** enabled for `linux/amd64` containers, and dual NICs (`eth0` for outbound NAT internet + `vz0` pinned to `192.168.64.50` for Wi-Fi-independent Mac-to-VM networking with zero OrbStack port conflicts):
 
 ```bash
-# Option 1: Run directly on the Ubuntu machine itself
-sudo apt update && sudo apt install -y ansible
-ansible-playbook -i ansible/inventory.ini -l local ansible/playbook.yml --ask-become-pass
-newgrp docker   # (or log out and back in so your shell picks up the 'docker' group)
+# 1. Install Lima (one-time) and boot the headless Ubuntu 26.04 LTS VM:
+brew install lima
+limactl start --name=beelink ./beelink.yaml --tty=false
 
-# Option 2: Run remotely from your Mac over SSH (after editing [ubuntu_lab] in ansible/inventory.ini)
-ansible-playbook -i ansible/inventory.ini -l ubuntu_lab ansible/playbook.yml --ask-become-pass
+# 2. Provision the VM with Ansible (installs Docker, Kind, Kubectl, Helm, Argo CD, sysctl limits):
+uv run --with ansible-core ansible-playbook -i ansible/inventory.ini -l lima ansible/playbook.yml
+
+# 3. Drop into the Ubuntu Server TUI and boot the 3-cluster platform:
+limactl shell beelink
+cd ~/Projects/local-lab && ./scripts/bootstrap-linux.sh
 ```
 
-### Step B: Boot the Platform on Linux
+Once running inside the `beelink` VM, all UIs are reachable from your Mac via its dedicated host-only IP **`192.168.64.50`** (e.g. `http://192.168.64.50:3000` for Gitea, `http://192.168.64.50:8070` for Grafana, `https://192.168.64.50:8075` for Argo CD).
+
+### Option 2: Physical Ubuntu Server (e.g. Beelink SER9 / Native `x86_64`)
+
+#### Step A: Prepare a Fresh Ubuntu Host with Ansible (One-Time Setup)
+
+An idempotent Ansible playbook ([`ansible/playbook.yml`](ansible/playbook.yml)) is included to install all prerequisites on Ubuntu 22.04 / 24.04 / 26.04 (`docker`, `kind`, `kubectl`, `kustomize`, `helm`, `argocd`, `jq`, `skopeo`, `git`, `curl`, `go`), tune kernel `inotify` limits for running 3 Kind clusters concurrently, and pre-configure `/etc/hosts` and `/etc/docker/daemon.json`:
+
+```bash
+# Option A: Run from your Mac against the remote Ubuntu server over SSH (via uv — no global Ansible install needed)
+# Either pass user@ip inline (note the trailing comma):
+uv run --with ansible-core ansible-playbook -i "luis@<UBUNTU_IP>," ansible/playbook.yml --ask-become-pass
+
+# Or set the host under [ubuntu_lab] in ansible/inventory.ini and run:
+uv run --with ansible-core ansible-playbook -i ansible/inventory.ini -l ubuntu_lab ansible/playbook.yml --ask-become-pass
+
+# Option B: Run directly on the Ubuntu machine itself
+uv run --with ansible-core ansible-playbook -i ansible/inventory.ini -l local ansible/playbook.yml --ask-become-pass
+newgrp docker   # (or log out and back in so your shell picks up the 'docker' group)
+```
+
+#### Step B: Boot the Platform on Linux
 
 Simply run [`./scripts/bootstrap-linux.sh`](scripts/bootstrap-linux.sh), which automatically verifies (and applies if missing) the 3 Linux host adjustments before invoking [`scripts/bootstrap-common.sh`](scripts/bootstrap-common.sh):
 
